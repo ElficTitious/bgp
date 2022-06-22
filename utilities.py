@@ -23,6 +23,7 @@ class IPHeader:
                del fragmento actual, y toma el valor False si este es el 
                último fragmento del datagrama original.
   msg (str): Mensaje siendo enviado en el paquete.
+  is_start_bgp (bool): Valor booleano que indica si el mensaje es START_BGP.
   """
 
   ip_address: str
@@ -33,6 +34,7 @@ class IPHeader:
   size: str
   flag: bool
   msg: str
+  is_start_bgp: bool
 
   def to_string(self) -> str:
     """Método usado para tranformar esta instancia a string (inversa de
@@ -56,8 +58,7 @@ class RoutingTableLine:
   -----------
   possible_ip_addresses (list[str]): Lista con todas las potenciales direcciones
                                      IP generadas a partir de una red (CIDR).
-  initial_port (int): Inicio del rango de puertos.
-  final_port (int): Fin del rango de puertos.
+  asn_route (list[int]): Lista con la ruta ASN
   landing_ip (str): Dirección IP donde redirigir dados los valores anteriores
   landing_port (int): Puerto donde redirigir dados los primeros dos valores y la IP 
                       anterior
@@ -65,8 +66,7 @@ class RoutingTableLine:
   """
 
   possible_ip_addresses: list[str]
-  initial_port: int
-  final_port: int
+  asn_route: list[int]
   landing_ip: str
   landing_port: int
   mtu: int
@@ -115,15 +115,114 @@ class CircularArrayWithPointer:
       self.__pointer += 1
       return self.__array[prev_pointer]
 
+@dataclass
+class BGPRoutes:
+  """Data class usada para representar rutas BGP.
+
+  Attributes:
+  -----------
+  asn_transmitter (int): ASN del router que envía el mensaje.
+  asn_routes (list[list[int]]): Lista de rutas ASN, donde cada ruta es a su
+                                vez una lista de enteros, representando cada entero
+                                un ASN.
+  """
+
+  asn_transmitter: int
+  asn_routes: list[list[int]]
+
+  def to_string(self) -> str:
+    """Método usado para tranformar esta instancia a string, el cual puede ser
+    enviado como mensaje BGP en un datagrama.
+
+    Returns:
+    --------
+    (str): Representación del mensaje como str.
+    """
+    bgp_msg = f'BGP_ROUTES\n{self.asn_transmitter}\n'
+    for route in self.asn_routes:
+      bgp_msg += ' '.join([str(asn) for asn in route]) + '\n'
+
+    bgp_msg += 'END_BGP_ROUTES'
+    return bgp_msg
+
+def create_BGP_message(routing_table_file_name: str, asn_transmitter: int) -> str:
+  """Función encargada de generar el mensaje BGP para un router especifico dado
+  por su ASN y su tabla de rutas.
+
+  Parameters:
+  -----------
+  routing_table_file_name (str): Nombre del archivo que contiene la tabla de ruteo.
+  asn_transmitter (int): ASN del router para el cual se genera el mensaje BGP.
+
+  Returns:
+  --------
+  (str): Mensaje BGP dado por el ASN del router transmisor y su tabla de rutas.
+  """
+
+  # Abrimos el archivo que contiene la tabla de rutas y leemos sus lineas
+  routing_table_file = open(routing_table_file_name, 'r')
+  routing_table_lines = routing_table_file.readlines()
+
+  # Creamos una variable donde almacenar las rutas ASN
+  asn_routes = []
+
+  # Iteramos sobre las lineas
+  for line in routing_table_lines:
+
+    # Parseamos la línea
+    routing_table_line = parse_routing_table_line(line.strip('\n'))
+
+    # Agregamos la ruta ASN
+    asn_routes.append(routing_table_line.asn_route)
+  
+  # Cerramos el archivo con tabla de ruteo
+  routing_table_file.close()
+  
+  # Construimos y retornamos el mensaje BGP
+  return BGPRoutes(asn_transmitter, asn_routes).to_string()
+
+def parse_BGP_routes(BGP_routes: str) -> BGPRoutes:
+  """Función usada para parsear un mensaje BGP_ROUTES, transformandolo a su representación
+  como instancia de la clase BGPRoutes.
+
+  Parameters:
+  -----------
+  BGP_routes (str): Mensaje BGP_ROUTES a parsear.
+
+  Returns:
+  --------
+  (BGPRoutes): Instancia de la clase BGPRoutes representando el mismo mensaje pasado
+                como parámetro.
+  """
+
+  # Separamos el mensaje BGP en sus lineas
+  lines = BGP_routes.split('\n')
+
+  # Prescindimos del primer y ultimo elementos (BGP_ROUTES y END_BGP_ROUTES)
+  lines.pop(0)
+  lines.pop(-1)
+
+  # Guardamos y quitamos el ASN del router emisor
+  asn_transmitter = int(lines.pop(0))
+
+  # Generamos las rutas ASN
+  asn_routes = []
+  for raw_route in lines:
+    asn_route = [int(asn) for asn in raw_route.split(' ')]
+    asn_routes.append(asn_route)
+  
+  # Generamos y retornamos la instancia de BGPRoutes
+  return BGPRoutes(asn_transmitter, asn_routes)
+
 def parse_routing_table_line(routing_table_line: str) -> RoutingTableLine:
   """Función que dada una linea de una tabla de ruteo, de la forma
-  [Red (CIDR)] [Puerto_Inicial] [Puerto_final] [IP_Para_llegar] [Puerto_para_llegar] [MTU],
+  [Red (CIDR)] [Ruta ASN] [IP_Para_llegar] [Puerto_para_llegar] [MTU],
   la parsea retornando una instancia de RoutingTableLine.
 
   Parameters:
   -----------
   routing_table_line (str): Linea de una tabla de ruteo, la cual debe ser de la forma
-                            [Red (CIDR)] [Puerto_Inicial] [Puerto_final] [IP_Para_llegar] [Puerto_para_llegar] [MTU].
+                            [Red (CIDR)] [Ruta ASN] [IP_Para_llegar] [Puerto_para_llegar] [MTU].
   
   Returns:
   --------
@@ -136,19 +235,18 @@ def parse_routing_table_line(routing_table_line: str) -> RoutingTableLine:
 
   # Guardamos el contenido en variables ad-hoc
   cidr_net = routing_table_line_contents_list[0]
-  initial_port = int(routing_table_line_contents_list[1])
-  final_port = int(routing_table_line_contents_list[2])
-  landing_ip = routing_table_line_contents_list[3]
-  landing_port = int(routing_table_line_contents_list[4])
-  mtu = int(routing_table_line_contents_list[5])
+  asn_route = [int(asn) for asn in routing_table_line_contents_list[1:-3]]
+  landing_ip = routing_table_line_contents_list[-3]
+  landing_port = int(routing_table_line_contents_list[-2])
+  mtu = int(routing_table_line_contents_list[-1])
 
   # Generamos la lista con todas las potenciales direcciones IP generadas 
   # a partir de la red (CIDR) presente en la linea.
   possible_ip_addresses = [str(ip) for ip in ipaddress.IPv4Network(cidr_net)]
 
   # Retornamos la instancia de RoutingTableLine
-  return RoutingTableLine(possible_ip_addresses, initial_port, 
-                          final_port, landing_ip, landing_port, mtu)
+  return RoutingTableLine(possible_ip_addresses, asn_route, 
+                          landing_ip, landing_port, mtu)
 
 class RoundRobinRoutingTable:
   """Clase usada para representar tablas de ruteo, añadiendo la funcionalidad
@@ -191,7 +289,7 @@ class RoundRobinRoutingTable:
 
       # Revisamos si en la linea actual se indica como hacer forward para la dirección de destino
       if (destination_ip in routing_table_line.possible_ip_addresses and 
-          destination_port in range(routing_table_line.initial_port, routing_table_line.final_port + 1)):
+          destination_port in routing_table_line.asn_route):
       
         # De ser el caso agregamos la dirección a la cual hacer forward a la lista con la cual inicializar
         # el CircularArrayWithPointer, y asi mismo el MTU del enlace
@@ -265,9 +363,10 @@ def parse_ip_header(ip_header: str) -> IPHeader:
   # Asumimos que el FLAG será solo 0 o 1
   flag = True if packet_contents_list[6] == '1' else False 
   msg = packet_contents_list[7]
+  is_start_bgp = (msg.strip('\n') == 'START_BGP')
 
   # Retornamos el contenido empaquetado en una instancia de IPHeader
-  return IPHeader(ip_address, port, ttl, id, offset, size, flag, msg)
+  return IPHeader(ip_address, port, ttl, id, offset, size, flag, msg, is_start_bgp)
 
 def next_hop(round_robin_routing_table: RoundRobinRoutingTable, 
              destination_address: tuple[str, int]) -> tuple[tuple[str, int], int] | None:
@@ -386,7 +485,7 @@ def fragment_ip_packet(ip_packet: str, mtu: int) -> list[str]:
       # Construimos el fragmento y lo agregamos a la lista
       curr_fragment = IPHeader(
         ip_address, port, ttl, id, curr_frag_offset,
-        curr_frag_size, curr_frag_flag, curr_frag_msg.decode()
+        curr_frag_size, curr_frag_flag, curr_frag_msg.decode(), False
       )
       fragments_list.append(curr_fragment)
 
@@ -471,6 +570,96 @@ def reassemble_ip_packet(fragment_list: list[str]) -> str | None:
     reassembled_ip_packet = IPHeader(
       fst_frag.ip_address, fst_frag.port, fst_frag.ttl, fst_frag.id,
       fst_frag.offset, generate_ip_header_size(len(total_msg.encode())),
-      False, total_msg
+      False, total_msg, False
     )
     return reassembled_ip_packet.to_string()
+
+def get_neighbor_addresses(routing_table_file_name: str) -> list[tuple[str, int]]:
+  """Función encargada de generar una lista con la dirección de cada
+  vecino para un router especifico dada su su tabla de rutas inicial.
+
+  Parameters:
+  -----------
+  routing_table_file_name (str): Nombre del archivo que contiene la tabla de ruteo.
+
+  Returns:
+  --------
+  (list[tuple[str, int]]): Lista con la dirección de cada vecino del router dado
+                            por su tabla de rutas inicial.
+  """
+
+  # Abrimos el archivo que contiene la tabla de rutas y leemos sus lineas
+  routing_table_file = open(routing_table_file_name, 'r')
+  routing_table_lines = routing_table_file.readlines()
+
+  # Creamos una variable donde almacenar las direcciones
+  neighbor_adresses = []
+
+  # Iteramos sobre las lineas
+  for line in routing_table_lines:
+
+    # Parseamos la línea
+    routing_table_line = parse_routing_table_line(line.strip('\n'))
+
+    # Agregamos la dirección
+    neighbor_adresses.append(
+      (routing_table_line.landing_ip, routing_table_line.landing_port)
+    )
+
+  # Cerramos el archivo con tabla de ruteo
+  routing_table_file.close()
+  
+  # Retornamos la lista de direcciones
+  return neighbor_adresses
+
+def generate_and_write_routing_table(routing_table_file_name: str, result_file_name: str, bgp_routes: BGPRoutes) -> str:
+  """Función encargada de generar una nueva tabla de rutas a partir de un objeto
+  de tipo BGPRoutes, la cual es escrita en el archivo result_file_name.
+
+  Parameters:
+  -----------
+  routing_table_file_name (str): Nombre del archivo que contiene la tabla de ruteo.
+  result_file_name (str): Nombre de archivo donde escribir la tabla de ruteo resultante
+  bgp_routes (BGPRoutes): Mensaje de tipo BGP_ROUTES con la información necesaria
+                          para generar la hoja de rutas.
+
+  Returns:
+  --------
+  (str): Contenido de la tabla de ruteo resultante.
+  """
+
+  # Abrimos el archivo que contiene la tabla de rutas y leemos sus lineas
+  routing_table_file = open(routing_table_file_name, 'r')
+  routing_table_lines = routing_table_file.readlines()
+  parsed_routing_table_lines = list(map(
+    lambda line: parse_routing_table_line(line.strip('\n')),
+    routing_table_lines
+  ))
+
+  # Cerramos el archivo con tabla de ruteo
+  routing_table_file.close()
+
+  # Creamos las lineas, donde por simplicidad asumimos que la Red (CIDR) es 
+  # siempre 127.0.0.0/24, con MTU igual a 1000.
+  lines = ''
+  for asn_route in bgp_routes.asn_routes:
+    landing_ip: str
+    landing_port: int
+    for parsed_line in parsed_routing_table_lines:
+      if asn_route[-2] == parsed_line.asn_route[0]:
+        landing_ip = parsed_line.landing_ip
+        landing_port = parsed_line.landing_port
+        break
+
+    # Creamos la linea
+    lines += f'127.0.0.0/24 {" ".join([str(asn) for asn in asn_route])} {landing_ip} {landing_port} 1000\n'
+  
+  # Quitamos el último salto de linea
+  lines = lines[:-1]
+
+  # escribimos las lineas
+  with open(result_file_name, "w") as routing_table_result_file:
+    routing_table_result_file.write(lines)
+
+  # Retornamos el contenido de la tabla de ruteo
+  return lines
